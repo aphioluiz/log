@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JETI Telemetry Analyzer</title>
+
+<link rel="manifest" href="manifest.json">
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+
+:root{
+ --jeti-red:#d71920;
+ --jeti-dark:#0b0b0b;
+ --jeti-gray:#1c1c1c;
+ --jeti-light:#ffffff;
+}
+
+*{box-sizing:border-box}
+
+body{
+ margin:0;
+ font-family:Segoe UI,Roboto,Arial;
+ background:var(--jeti-dark);
+ color:white;
+}
+
+header{
+ display:flex;
+ align-items:center;
+ gap:15px;
+ padding:15px 25px;
+ background:black;
+ border-bottom:3px solid var(--jeti-red);
+}
+
+header img{
+ height:42px;
+}
+
+header h1{
+ font-size:20px;
+ margin:0;
+ font-weight:600;
+}
+
+.container{
+ max-width:1400px;
+ margin:auto;
+ padding:25px;
+}
+
+.upload{
+ margin:20px 0 30px 0;
+}
+
+input[type=file]{
+ background:#111;
+ color:white;
+ padding:10px;
+ border:1px solid #333;
+ border-radius:6px;
+}
+
+.cards{
+ display:grid;
+ grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+ gap:15px;
+ margin-bottom:30px;
+}
+
+.card{
+ background:var(--jeti-gray);
+ border-left:4px solid var(--jeti-red);
+ padding:15px;
+ border-radius:8px;
+ box-shadow:0 5px 15px rgba(0,0,0,.5);
+}
+
+.card b{
+ font-size:15px;
+}
+
+.card .value{
+ font-size:14px;
+ margin-top:4px;
+ opacity:.9;
+}
+
+.sensor-list{
+ margin:25px 0;
+ line-height:1.9;
+ background:#111;
+ padding:15px;
+ border-radius:8px;
+}
+
+.sensor-list h3{
+ margin-top:0;
+}
+
+.chartCard{
+ background:var(--jeti-gray);
+ padding:20px;
+ border-radius:10px;
+ margin-bottom:25px;
+ box-shadow:0 10px 25px rgba(0,0,0,.5);
+}
+
+canvas{
+ background:white;
+ border-radius:6px;
+}
+
+.status-good{color:#22c55e}
+.status-warn{color:#f59e0b}
+.status-bad{color:#ef4444}
+
+footer{
+ text-align:center;
+ padding:20px;
+ opacity:.6;
+ font-size:13px;
+}
+
+</style>
+</head>
+
+<body>
+
+<header>
+<img src="logo.png" alt="JETI">
+<h1>JETI Telemetry Analyzer</h1>
+</header>
+
+<div class="container">
+
+<div class="upload">
+<input type="file" id="fileInput">
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="sensor-list" id="sensorList"></div>
+
+<div id="charts"></div>
+
+</div>
+
+<footer>
+Telemetry Log Analyzer
+</footer>
+
+<script>
+
+if('serviceWorker' in navigator){
+ navigator.serviceWorker.register('sw.js');
+}
+
+let sensorMap = {};
+let sensores = {};
+let charts = {};
+let activeSensors = new Set();
+
+const PRIORITY = ["Q","RSSI","Signal","U Rx","Voltage","Current","Capacity","Airspeed"];
+
+document.getElementById('fileInput').addEventListener('change', handleFile);
+
+function handleFile(event){
+ const file = event.target.files[0];
+ const reader = new FileReader();
+ reader.onload = function(e){
+  parseJETI(e.target.result);
+ };
+ reader.readAsText(file);
+}
+
+function parseJETI(text){
+
+ sensorMap = {};
+ sensores = {};
+ charts = {};
+ activeSensors.clear();
+
+ document.getElementById('charts').innerHTML = '';
+ document.getElementById('sensorList').innerHTML = '';
+ document.getElementById('cards').innerHTML = '';
+
+ const lines = text.split(/\r?\n/);
+
+ lines.forEach(line=>{
+
+  if(!line || line.startsWith('#')) return;
+
+  const p = line.split(';');
+
+  if(p.length === 5){
+
+   const device = p[1];
+   const index = p[2];
+   const name = p[3];
+   const unit = p[4];
+
+   sensorMap[device+"_"+index] = {name,unit};
+  }
+
+  if(p.length > 6){
+
+   const time = Number(p[0]);
+   const device = p[1];
+
+   for(let i=2;i<p.length;i+=4){
+
+    const sensorIndex = p[i];
+    const decimals = Number(p[i+2]);
+    const raw = Number(p[i+3]);
+
+    const key = device+"_"+sensorIndex;
+
+    if(!sensorMap[key]) continue;
+
+    const sensor = sensorMap[key].name;
+    const unit = sensorMap[key].unit;
+
+    const value = raw / Math.pow(10,decimals);
+
+    if(!sensores[sensor]){
+     sensores[sensor] = {
+      unit,
+      data:[],
+      min:value,
+      max:value,
+      sum:0,
+      count:0,
+      low90:0,
+      low80:0
+     };
+    }
+
+    const minutes = time / 60000;
+
+    sensores[sensor].data.push({x:minutes,y:value});
+
+    sensores[sensor].sum += value;
+    sensores[sensor].count += 1;
+
+    if(value < sensores[sensor].min) sensores[sensor].min = value;
+    if(value > sensores[sensor].max) sensores[sensor].max = value;
+
+    if(sensor.toLowerCase().includes('q') || sensor.toLowerCase().includes('signal')){
+
+      if(value < 90) sensores[sensor].low90++;
+      if(value < 80) sensores[sensor].low80++;
+
+    }
+
+   }
+  }
+
+ });
+
+ buildSensors();
+ updateCards();
+}
+
+function buildSensors(){
+
+ const list = document.getElementById('sensorList');
+
+ list.innerHTML='<h3>Sensores detectados</h3>';
+
+ const ordered = Object.keys(sensores).sort((a,b)=>isPriority(b)-isPriority(a));
+
+ ordered.forEach(sensor=>{
+
+  const checked = isPriority(sensor);
+
+  if(checked) activeSensors.add(sensor);
+
+  list.innerHTML+=`
+  <label>
+  <input type="checkbox" ${checked?'checked':''} onchange="toggleSensor('${sensor}')">
+  ${sensor} (${sensores[sensor].unit})
+  </label><br>`;
+
+  createChart(sensor);
+
+  if(!checked) charts[sensor].canvas.parentElement.style.display='none';
+
+ });
+}
+
+function updateCards(){
+
+ const cards = document.getElementById('cards');
+
+ cards.innerHTML='';
+
+ activeSensors.forEach(sensor=>{
+
+  const s = sensores[sensor];
+
+  const avg = s.sum / s.count;
+
+  let status='status-good';
+
+  if(sensor.toLowerCase().includes('q') || sensor.toLowerCase().includes('signal')){
+
+     if(s.min < 80) status='status-bad';
+     else if(s.min < 90) status='status-warn';
+
+  }
+
+  const card = document.createElement('div');
+  card.className='card';
+
+  let extra='';
+
+  if(s.low90>0 || s.low80>0){
+
+   extra=`
+   <div class="value status-warn">Quedas <90%: ${s.low90}</div>
+   <div class="value status-bad">Quedas <80%: ${s.low80}</div>`;
+
+  }
+
+  card.innerHTML=`
+  <b class="${status}">${sensor}</b>
+  <div class="value">Min: ${round(s.min)} ${s.unit}</div>
+  <div class="value">Média: ${round(avg)} ${s.unit}</div>
+  <div class="value">Max: ${round(s.max)} ${s.unit}</div>
+  ${extra}
+  `;
+
+  cards.appendChild(card);
+
+ });
+}
+
+function createChart(sensor){
+
+ const chartsDiv = document.getElementById('charts');
+
+ const card = document.createElement('div');
+ card.className='chartCard';
+
+ const canvas=document.createElement('canvas');
+ card.appendChild(canvas);
+ chartsDiv.appendChild(card);
+
+ const ctx=canvas.getContext('2d');
+
+ charts[sensor]=new Chart(ctx,{
+
+  type:'line',
+
+  data:{
+   datasets:[{
+    label:sensor,
+    data:sensores[sensor].data,
+    borderWidth:2,
+    tension:0.25,
+    pointRadius:0,
+    borderColor:'#d71920'
+   }]
+  },
+
+  options:{
+
+   parsing:false,
+   responsive:true,
+
+   plugins:{
+    legend:{display:true}
+   },
+
+   scales:{
+
+    x:{
+     type:'linear',
+     title:{display:true,text:'Tempo (min)'}
+    },
+
+    y:{
+     title:{display:true,text:sensores[sensor].unit}
+    }
+
+   }
+
+  }
+
+ });
+}
+
+function toggleSensor(sensor){
+
+ const card = charts[sensor].canvas.parentElement;
+
+ if(activeSensors.has(sensor)){
+
+   activeSensors.delete(sensor);
+   card.style.display='none';
+
+ }else{
+
+   activeSensors.add(sensor);
+   card.style.display='block';
+
+ }
+
+ updateCards();
+
+}
+
+function isPriority(name){
+ return PRIORITY.some(k=>name.toLowerCase().includes(k.toLowerCase()));
+}
+
+function round(v){
+ return Math.round(v*100)/100;
+}
+
+</script>
+
+</body>
+</html>
+
+
